@@ -16,6 +16,8 @@ from contextlib import nullcontext
 import time
 from pytorch_lightning import seed_everything
 
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
@@ -79,6 +81,29 @@ def chunk(it, size):
 	it = iter(it)
 	return iter(lambda: tuple(islice(it, size)), ())
 
+class ImageDataset(Dataset):
+    def __init__(self, init_img_dir, outpath, device, transform=None):
+        self.init_img_dir = init_img_dir
+        self.outpath = outpath
+        self.device = device
+        self.transform = transform if transform else transforms.ToTensor()
+        # Filter out non-image files and optionally perform subsampling
+        self.img_list = [img for img in sorted(os.listdir(init_img_dir)) if img.endswith(('.png', '.jpg', '.jpeg'))]
+        # Exclude already processed images
+        self.img_list = [img for img in self.img_list if not os.path.exists(os.path.join(outpath, img))]
+
+    def __len__(self):
+        return len(self.img_list)
+
+    def __getitem__(self, idx):
+        img_name = self.img_list[idx]
+        img_path = os.path.join(self.init_img_dir, img_name)
+        image = load_img(img_path)
+        if self.transform:
+            image = self.transform(image)
+        image = image.clamp(-1, 1)
+        return image
+
 def load_model_from_config(config, ckpt, verbose=False):
 	print(f"Loading model from {ckpt}")
 	pl_sd = torch.load(ckpt, map_location="cpu")
@@ -110,6 +135,8 @@ def load_img(path):
 	return 2.*image - 1.
 
 
+
+
 def main():
 	parser = argparse.ArgumentParser()
 
@@ -118,14 +145,14 @@ def main():
 		type=str,
 		nargs="?",
 		help="path to the input image",
-		default="inputs/user_upload",
+		default="data/flatnet2single/inputs",
 	)
 	parser.add_argument(
 		"--outdir",
 		type=str,
 		nargs="?",
 		help="dir to write results to",
-		default="outputs/user_upload",
+		default="data/flatnet2single/outputs_ft",
 	)
 	parser.add_argument(
 		"--ddpm_steps",
@@ -154,7 +181,7 @@ def main():
 	parser.add_argument(
 		"--config",
 		type=str,
-		default="configs/stableSRNew/v2-finetune_text_T_512.yaml",
+		default="configs/stableSRNew/v2-finetune_lensless_T_512.yaml",
 		help="path to config which constructs model",
 	)
 	parser.add_argument(
@@ -188,12 +215,12 @@ def main():
 		default=512,
 		help="input size",
 	)
-	parser.add_argument(
-		"--dec_w",
-		type=float,
-		default=0.5,
-		help="weight for combining VQGAN and Diffusion",
-	)
+	# parser.add_argument(
+	# 	"--dec_w",
+	# 	type=float,
+	# 	default=0.5,
+	# 	help="weight for combining VQGAN and Diffusion",
+	# )
 	parser.add_argument(
 		"--colorfix_type",
 		type=str,
@@ -213,10 +240,10 @@ def main():
 		print('No color correction')
 	print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
 
-	vqgan_config = OmegaConf.load("configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml")
-	vq_model = load_model_from_config(vqgan_config, opt.vqgan_ckpt)
-	vq_model = vq_model.to(device)
-	vq_model.decoder.fusion_w = opt.dec_w
+	# vqgan_config = OmegaConf.load("configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml")
+	# vq_model = load_model_from_config(vqgan_config, opt.vqgan_ckpt)
+	# vq_model = vq_model.to(device)
+	# vq_model.decoder.fusion_w = opt.dec_w
 
 	seed_everything(opt.seed)
 
@@ -234,13 +261,14 @@ def main():
 
 	batch_size = opt.n_samples
 
-	img_list_ori = os.listdir(opt.init_img)
+	img_list_ori = os.listdir(opt.init_img)[::100]
+	# print("len(img_list_ori)", len(img_list_ori))
 	img_list = copy.deepcopy(img_list_ori)
 	init_image_list = []
-	for item in img_list_ori[::10]:
-		if os.path.exists(os.path.join(outpath, item)):
-			img_list.remove(item)
-			continue
+	for item in img_list_ori:
+		# if os.path.exists(os.path.join(outpath, item)):
+		# 	img_list.remove(item)
+		# 	continue
 		cur_image = load_img(os.path.join(opt.init_img, item)).to(device)
 		cur_image = transform(cur_image)
 		cur_image = cur_image.clamp(-1, 1)
@@ -289,15 +317,15 @@ def main():
 
 	param_list = []
 	untrain_paramlist = []
-	for k, v in vq_model.named_parameters():
-		if 'fusion_layer' in k:
-			param_list.append(v)
-		elif 'loss' not in k:
-			untrain_paramlist.append(v)
-	trainable_params += sum(p.numel() for p in param_list)
-	# untrainable_params += sum(p.numel() for p in untrain_paramlist)
-	print(trainable_params)
-	print(untrainable_params)
+	# for k, v in vq_model.named_parameters():
+	# 	if 'fusion_layer' in k:
+	# 		param_list.append(v)
+	# 	elif 'loss' not in k:
+	# 		untrain_paramlist.append(v)
+	# trainable_params += sum(p.numel() for p in param_list)
+	# # untrainable_params += sum(p.numel() for p in untrain_paramlist)
+	# print(trainable_params)
+	# print(untrainable_params)
 
 	precision_scope = autocast if opt.precision == "autocast" else nullcontext
 	niqe_list = []
@@ -308,7 +336,8 @@ def main():
 				count = 0
 				for n in trange(niters, desc="Sampling"):
 					init_image = init_image_list[n]
-					init_latent_generator, enc_fea_lq = vq_model.encode(init_image)
+					print(init_image.shape,init_image.dtype)
+					init_latent_generator = model.encode_first_stage(init_image)
 					init_latent = model.get_first_stage_encoding(init_latent_generator)
 					text_init = ['']*init_image.size(0)
 					semantic_c = model.cond_stage_model(text_init)
@@ -321,7 +350,7 @@ def main():
 					x_T = None
 
 					samples, _ = model.sample(cond=semantic_c, struct_cond=init_latent, batch_size=init_image.size(0), timesteps=opt.ddpm_steps, time_replace=opt.ddpm_steps, x_T=x_T, return_intermediates=True)
-					x_samples = vq_model.decode(samples * 1. / model.scale_factor, enc_fea_lq)
+					x_samples = model.decode_first_stage(samples)
 					if opt.colorfix_type == 'adain':
 						x_samples = adaptive_instance_normalization(x_samples, init_image)
 					elif opt.colorfix_type == 'wavelet':

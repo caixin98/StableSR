@@ -1,4 +1,4 @@
-name: stablesr
+name: sr
 channels:
   - pytorch
   - defaults

@@ -17,7 +17,7 @@ from functools import partial
 from tqdm import tqdm
 from torchvision.utils import make_grid
 from pytorch_lightning.utilities.distributed import rank_zero_only
-
+from torch.cuda.amp import autocast
 from ldm.util import log_txt_as_img, exists, default, ismap, isimage, mean_flat, count_params, instantiate_from_config
 from ldm.modules.ema import LitEma
 from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianDistribution
@@ -188,6 +188,7 @@ class DDPM(pl.LightningModule):
                  use_positional_encodings=False,
                  learn_logvar=False,
                  logvar_init=0.,
+                 rescale_timesteps=False, # if True, pass floating point timesteps into the model so that they are always scaled like in the original paper (0 to 1000).
                  ):
         super().__init__()
         assert parameterization in ["eps", "x0", "v"], 'currently only supporting "eps" and "x0" and "v"'
@@ -229,7 +230,7 @@ class DDPM(pl.LightningModule):
         self.logvar = torch.full(fill_value=logvar_init, size=(self.num_timesteps,))
         if self.learn_logvar:
             self.logvar = nn.Parameter(self.logvar, requires_grad=True)
-
+        self.rescale_timesteps = rescale_timesteps
 
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
                           linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
@@ -362,37 +363,61 @@ class DDPM(pl.LightningModule):
 
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         return model_mean, posterior_variance, posterior_log_variance
+    def _scale_timesteps(self, t):
+        if self.rescale_timesteps:
+            return t.float() * (1000.0 / self.num_timesteps)
+        return t
+    
+    # def condition_mean(self, cond_guidance, mean, variance, x, t, model_kwargs=None):
+    #     """
+    #     Compute the mean for the previous step, given a function cond_guidance that
+    #     computes the gradient of a conditional log probability with respect to
+    #     x. In particular, cond_guidance computes grad(log(p(y|x))), and we want to
+    #     condition on y.
+    #     cond_guidance have 
 
+    #     """
+    #     x = x.detach().requires_grad_()
+    #     gradient = cond_guidance(x, self._scale_timesteps(t), **model_kwargs)
+    #     new_mean = (
+    #         mean.float() + variance * gradient.float()
+    #     )
+    #     return new_mean
+    
     @torch.no_grad()
-    def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
+    def p_sample(self, x, t, clip_denoised=True, repeat_noise=False, cond_guidance=None):
         b, *_, device = *x.shape, x.device
-        model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
+        model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised, cond_guidance=cond_guidance)
         noise = noise_like(x.shape, device, repeat_noise)
+   
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
+ 
+
     @torch.no_grad()
-    def p_sample_loop(self, shape, return_intermediates=False):
+    def p_sample_loop(self, shape, return_intermediates=False, cond_guidance=None):
         device = self.betas.device
         b = shape[0]
         img = torch.randn(shape, device=device)
         intermediates = [img]
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='Sampling t', total=self.num_timesteps):
             img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long),
-                                clip_denoised=self.clip_denoised)
+                                clip_denoised=self.clip_denoised, cond_guidance=cond_guidance)
             if i % self.log_every_t == 0 or i == self.num_timesteps - 1:
                 intermediates.append(img)
         if return_intermediates:
             return img, intermediates
         return img
+    
 
     @torch.no_grad()
-    def sample(self, batch_size=16, return_intermediates=False):
+    def sample(self, batch_size=16, return_intermediates=False, cond_guidance=None):
         image_size = self.image_size
         channels = self.channels
         return self.p_sample_loop((batch_size, channels, image_size, image_size),
-                                  return_intermediates=return_intermediates)
+                                  return_intermediates=return_intermediates, cond_guidance=cond_guidance)
 
     def q_sample(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
@@ -1208,7 +1233,7 @@ class LatentDiffusion(DDPM):
         return loss, loss_dict
 
     def p_mean_variance(self, x, c, t, clip_denoised: bool, return_codebook_ids=False, quantize_denoised=False,
-                        return_x0=False, score_corrector=None, corrector_kwargs=None):
+                        return_x0=False, score_corrector=None, corrector_kwargs=None, cond_guidance=None):
         t_in = t
         model_out = self.apply_model(x, t_in, c, return_ids=return_codebook_ids)
 
@@ -1243,13 +1268,13 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def p_sample(self, x, c, t, clip_denoised=False, repeat_noise=False,
                  return_codebook_ids=False, quantize_denoised=False, return_x0=False,
-                 temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None):
+                 temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None, cond_guidance=None):
         b, *_, device = *x.shape, x.device
         outputs = self.p_mean_variance(x=x, c=c, t=t, clip_denoised=clip_denoised,
                                        return_codebook_ids=return_codebook_ids,
                                        quantize_denoised=quantize_denoised,
                                        return_x0=return_x0,
-                                       score_corrector=score_corrector, corrector_kwargs=corrector_kwargs)
+                                       score_corrector=score_corrector, corrector_kwargs=corrector_kwargs,cond_guidance=cond_guidance)
         if return_codebook_ids:
             raise DeprecationWarning("Support dropped.")
             model_mean, _, model_log_variance, logits = outputs
@@ -1263,7 +1288,7 @@ class LatentDiffusion(DDPM):
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
-
+ 
         if return_codebook_ids:
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, logits.argmax(dim=1)
         if return_x0:
@@ -1275,7 +1300,7 @@ class LatentDiffusion(DDPM):
     def progressive_denoising(self, cond, shape, verbose=True, callback=None, quantize_denoised=False,
                               img_callback=None, mask=None, x0=None, temperature=1., noise_dropout=0.,
                               score_corrector=None, corrector_kwargs=None, batch_size=None, x_T=None, start_T=None,
-                              log_every_t=None):
+                              log_every_t=None, cond_guidance=None):
         if not log_every_t:
             log_every_t = self.log_every_t
         timesteps = self.num_timesteps
@@ -1315,7 +1340,7 @@ class LatentDiffusion(DDPM):
                                             clip_denoised=self.clip_denoised,
                                             quantize_denoised=quantize_denoised, return_x0=True,
                                             temperature=temperature[i], noise_dropout=noise_dropout,
-                                            score_corrector=score_corrector, corrector_kwargs=corrector_kwargs)
+                                            score_corrector=score_corrector, corrector_kwargs=corrector_kwargs,cond_guidance=cond_guidance)
             if mask is not None:
                 assert x0 is not None
                 img_orig = self.q_sample(x0, ts)
@@ -1331,7 +1356,7 @@ class LatentDiffusion(DDPM):
     def p_sample_loop(self, cond, shape, return_intermediates=False,
                       x_T=None, verbose=True, callback=None, timesteps=None, quantize_denoised=False,
                       mask=None, x0=None, img_callback=None, start_T=None,
-                      log_every_t=None):
+                      log_every_t=None, cond_guidance=None):
 
         if not log_every_t:
             log_every_t = self.log_every_t
@@ -1364,7 +1389,7 @@ class LatentDiffusion(DDPM):
 
             img = self.p_sample(img, cond, ts,
                                 clip_denoised=self.clip_denoised,
-                                quantize_denoised=quantize_denoised)
+                                quantize_denoised=quantize_denoised, cond_guidance=cond_guidance)
             if mask is not None:
                 img_orig = self.q_sample(x0, ts)
                 img = img_orig * mask + (1. - mask) * img
@@ -1381,7 +1406,7 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def sample(self, cond, batch_size=16, return_intermediates=False, x_T=None,
                verbose=True, timesteps=None, quantize_denoised=False,
-               mask=None, x0=None, shape=None,**kwargs):
+               mask=None, x0=None, shape=None, cond_guidance=None, **kwargs):
         if shape is None:
             shape = (batch_size, self.channels, self.image_size//8, self.image_size//8)
         if cond is not None:
@@ -1394,7 +1419,7 @@ class LatentDiffusion(DDPM):
                                   shape,
                                   return_intermediates=return_intermediates, x_T=x_T,
                                   verbose=verbose, timesteps=timesteps, quantize_denoised=quantize_denoised,
-                                  mask=mask, x0=x0)
+                                  mask=mask, x0=x0,cond_guidance=cond_guidance)
 
     @torch.no_grad()
     def sample_log(self,cond,batch_size,ddim, ddim_steps,**kwargs):
@@ -1920,8 +1945,7 @@ class LatentDiffusionSRTextWT(DDPM):
         return [lq, gt]
 
     @torch.no_grad()
-    def get_input(self, batch, k=None, return_first_stage_outputs=False, force_c_encode=False,
-                  cond_key=None, return_original_cond=False, bs=None, val=False, text_cond=[''], return_gt=False, resize_lq=True):
+    def get_input(self, batch, k=None, return_first_stage_outputs=False, force_c_encode=False, cond_key=None, return_original_cond=False, bs=None, val=False, text_cond=[''], return_gt=False, resize_lq=True):
 
         """Degradation pipeline, modified from Real-ESRGAN:
         https://github.com/xinntao/Real-ESRGAN
@@ -2150,7 +2174,6 @@ class LatentDiffusionSRTextWT(DDPM):
                     print("reducing stride")
 
                 fold, unfold, normalization, weighting = self.get_fold_unfold(z, ks, stride, uf=uf)
-
                 z = unfold(z)  # (bn, nc * prod(**ks), L)
                 # 1. Reshape to img shape
                 z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
@@ -2195,8 +2218,8 @@ class LatentDiffusionSRTextWT(DDPM):
             z = rearrange(z, 'b h w c -> b c h w').contiguous()
 
         z = 1. / self.scale_factor * z
-
         if hasattr(self, "split_input_params"):
+
             if self.split_input_params["patch_distributed_vq"]:
                 ks = self.split_input_params["ks"]  # eg. (128, 128)
                 stride = self.split_input_params["stride"]  # eg. (64, 64)
@@ -2501,7 +2524,7 @@ class LatentDiffusionSRTextWT(DDPM):
 
     def p_mean_variance(self, x, c, struct_cond, t, clip_denoised: bool, return_codebook_ids=False, quantize_denoised=False,
                         return_x0=False, score_corrector=None, corrector_kwargs=None, t_replace=None, unconditional_conditioning=None, unconditional_guidance_scale=None,
-                        reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],
+                        reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000], cond_guidance=None,
                         ddnm_guidance=None
                         ):
         if t_replace is None:
@@ -2509,10 +2532,15 @@ class LatentDiffusionSRTextWT(DDPM):
         else:
             t_in = t_replace
 
-        if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
-            model_out = self.apply_model(x, t_in, c, struct_cond, return_ids=return_codebook_ids)
+        if cond_guidance is not None and cond_guidance.guidance_flag:
+            x_ = x.detach().clone().requires_grad_(True)
         else:
-            x_in = torch.cat([x] * 2)
+            x_ = x
+
+        if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
+            model_out = self.apply_model(x_, t_in, c, struct_cond, return_ids=return_codebook_ids)
+        else:
+            x_in = torch.cat([x_] * 2)
             t_in_ = torch.cat([t_in] * 2)
             c_in = torch.cat([unconditional_conditioning, c])
             e_t_uncond, e_t = self.apply_model(x_in, t_in_, c_in, struct_cond, return_ids=False).chunk(2)
@@ -2521,23 +2549,23 @@ class LatentDiffusionSRTextWT(DDPM):
 
         if score_corrector is not None:
             assert self.parameterization == "eps"
-            model_out = score_corrector.modify_score(self, model_out, x, t, c, **corrector_kwargs)
+            model_out = score_corrector.modify_score(self, model_out, x_, t, c, **corrector_kwargs)
 
         if return_codebook_ids:
             model_out, logits = model_out
 
         if self.parameterization == "eps":
-            x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
+            x_recon = self.predict_start_from_noise(x_, t=t, noise=model_out)
         elif self.parameterization == "x0":
             x_recon = model_out
         elif self.parameterization == "v":
-            x_recon = self.predict_start_from_z_and_v(x, model_out, t)
+            x_recon = self.predict_start_from_z_and_v(x_, model_out, t)
         else:
             raise NotImplementedError()
-
         if reference_sr is not None:
             # apply reference guidance
             if t[0] >= reference_range[0] and t[0] <= reference_range[1]:
+
                 xstart_current = x_recon.detach().clone().requires_grad_(True)
                 xstart_pred = x_recon.detach().clone().requires_grad_(False)
                 for _ in range(reference_step):
@@ -2553,18 +2581,68 @@ class LatentDiffusionSRTextWT(DDPM):
                         )
                     xstart_current = new_xstart.detach().requires_grad_(True)
                 x_recon = xstart_current.detach().clone()
+        
+        if cond_guidance is not None:
+            # apply conditional guidance (reference guidance is a special case of conditional guidance)
+            # cond_guidance have the following parameters (attributes):
+            # guidance_gt, guidance_func, guidance_loss, guidance_lr, guidance_step, guidance_range
+            # guidance_gt: the ground truth image for guidance
+            # guidance_loss: the loss function used for guidance
+            # guidance_weight: the weight for the guidance loss
+            # guidance_step: the number of steps for guidance
+            # guidance_range: the range of timesteps for guidance
+            # guidance_flag: calculate the gradient of x_t or x_0 (0 for x_0, 1 for x_t, default is 0)
+            if t[0] >= cond_guidance.guidance_range[0] and t[0] <= cond_guidance.guidance_range[1] and t[0] % 10 == 0:
+                xstart_current = x_recon.detach().clone().requires_grad_(True) if not cond_guidance.guidance_flag else x_recon
 
+                for _ in range(cond_guidance.guidance_step):
+                    with torch.enable_grad():
+                        img_recon = self.differentiable_decode_first_stage(xstart_current)
+                        opreated_xstart_current = cond_guidance.guidance_func(img_recon)
+                        # print('opreated_xstart_current', opreated_xstart_current.shape)
+                        # print('cond_guidance.guidance_gt', cond_guidance.guidance_gt.shape)
+                        # opreated_xstart_current.retain_grad()
+                        # loss = cond_guidance.guidance_loss(opreated_xstart_current, cond_guidance.guidance_gt)
+                  
+                        loss = cond_guidance.guidance_loss(opreated_xstart_current, cond_guidance.guidance_gt, reduction="sum")
+
+                        # print("opreated_xstart_current max:", torch.max(opreated_xstart_current), "min:", torch.min(opreated_xstart_current), "mean:", torch.mean(opreated_xstart_current))
+                        # print("cond_guidance.guidance_gt max:", torch.max(cond_guidance.guidance_gt), "min:", torch.min(cond_guidance.guidance_gt), "mean:", torch.mean(cond_guidance.guidance_gt))
+
+                        if not cond_guidance.guidance_flag:
+                            gradient = torch.autograd.grad(loss, xstart_current)[0] # gradient of x_0
+                        else:
+                            gradient = torch.autograd.grad(loss, x_)[0]
+                        # loss.backward()
+                        assert not torch.isnan(gradient).any()
+                        gradient = gradient * cond_guidance.guidance_weight
+                        # print('opreated_xstart_current', opreated_xstart_current)
+                        # print("cond_guidance.guidance_gt", cond_guidance.guidance_gt)
+                        # print("cond_guidance.guidance_gt.shape", cond_guidance.guidance_gt.shape)
+                        print('gradient', gradient.mean())
+                        print("xstart_current", xstart_current.mean())
+                        if not cond_guidance.guidance_flag:
+                            new_xstart = (
+                                    xstart_current.float().detach() -  gradient.float().detach() 
+                                )
+                        else:
+                            new_xstart = (
+                                    xstart_current.float().detach() - extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_.shape) * gradient.float().detach() 
+                                )  
+                    xstart_current = new_xstart.detach().requires_grad_(True) if not cond_guidance.guidance_flag else new_xstart
+                    
+                x_recon = xstart_current.detach().clone()
         if ddnm_guidance is not None:
             img_recon = self.decode_first_stage(x_recon)
             delta = ddnm_guidance(img_recon)
-            delta_generator = self.encode_first_stage(delta)
-            delta = self.get_first_stage_encoding(delta_generator)
+            delta_generator = self.model.encode_first_stage(delta)
+            delta = self.model.get_first_stage_encoding(delta_generator)
             x_recon = x_recon + ddnm_guidance.guidance_weight(t[0]) * delta
-
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
         if quantize_denoised:
             x_recon, _, [_, _, indices] = self.first_stage_model.quantize(x_recon)
+
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         if return_codebook_ids:
             return model_mean, posterior_variance, posterior_log_variance, logits
@@ -2576,7 +2654,7 @@ class LatentDiffusionSRTextWT(DDPM):
     def p_mean_variance_canvas(self, x, c, struct_cond, t, clip_denoised: bool, return_codebook_ids=False, quantize_denoised=False,
                         return_x0=False, score_corrector=None, corrector_kwargs=None, t_replace=None, tile_size=64, tile_overlap=32, batch_size=4, tile_weights=None,
                         unconditional_conditioning=None, unconditional_guidance_scale=None,
-                        reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000]):
+                        reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000], cond_guidance=None):
         assert tile_weights is not None
 
         if t_replace is None:
@@ -2740,7 +2818,7 @@ class LatentDiffusionSRTextWT(DDPM):
                  temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None, t_replace=None,
                  unconditional_conditioning=None, unconditional_guidance_scale=None,
                  reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],
-                 ddnm_guidance=None):
+                 cond_guidance=None):
         b, *_, device = *x.shape, x.device
         outputs = self.p_mean_variance(x=x, c=c, struct_cond=struct_cond, t=t, clip_denoised=clip_denoised,
                                        return_codebook_ids=return_codebook_ids,
@@ -2749,7 +2827,7 @@ class LatentDiffusionSRTextWT(DDPM):
                                        score_corrector=score_corrector, corrector_kwargs=corrector_kwargs, t_replace=t_replace,
                                        unconditional_conditioning=unconditional_conditioning, unconditional_guidance_scale=unconditional_guidance_scale,
                                        reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,
-                                       ddnm_guidance=ddnm_guidance)
+                                       cond_guidance=cond_guidance)
         if return_codebook_ids:
             raise DeprecationWarning("Support dropped.")
             model_mean, _, model_log_variance, logits = outputs
@@ -2764,6 +2842,7 @@ class LatentDiffusionSRTextWT(DDPM):
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
 
+
         if return_codebook_ids:
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, logits.argmax(dim=1)
         if return_x0:
@@ -2776,7 +2855,7 @@ class LatentDiffusionSRTextWT(DDPM):
                  return_codebook_ids=False, quantize_denoised=False, return_x0=False,
                  temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None, t_replace=None,
                  tile_size=64, tile_overlap=32, batch_size=4, tile_weights=None, unconditional_conditioning=None, unconditional_guidance_scale=None,
-                 reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000]):
+                 reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],cond_guidance=None):
         b, *_, device = *x.shape, x.device
         outputs = self.p_mean_variance_canvas(x=x, c=c, struct_cond=struct_cond, t=t, clip_denoised=clip_denoised,
                                        return_codebook_ids=return_codebook_ids,
@@ -2785,7 +2864,8 @@ class LatentDiffusionSRTextWT(DDPM):
                                        score_corrector=score_corrector, corrector_kwargs=corrector_kwargs, t_replace=t_replace,
                                        tile_size=tile_size, tile_overlap=tile_overlap, batch_size=batch_size, tile_weights=tile_weights,
                                        unconditional_conditioning=unconditional_conditioning, unconditional_guidance_scale=unconditional_guidance_scale,
-                                       reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range)
+                                       reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,
+                                       cond_guidance=cond_guidance)
         if return_codebook_ids:
             raise DeprecationWarning("Support dropped.")
             model_mean, _, model_log_variance, logits = outputs
@@ -2800,6 +2880,7 @@ class LatentDiffusionSRTextWT(DDPM):
         # no noise when t == 0
         nonzero_mask = (1 - (t[:b] == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
 
+
         if return_codebook_ids:
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, logits.argmax(dim=1)
         if return_x0:
@@ -2811,7 +2892,7 @@ class LatentDiffusionSRTextWT(DDPM):
     def progressive_denoising(self, cond, struct_cond, shape, verbose=True, callback=None, quantize_denoised=False,
                               img_callback=None, mask=None, x0=None, temperature=1., noise_dropout=0.,
                               score_corrector=None, corrector_kwargs=None, batch_size=None, x_T=None, start_T=None,
-                              log_every_t=None):
+                              log_every_t=None,cond_guidance=None):
         if not log_every_t:
             log_every_t = self.log_every_t
         timesteps = self.num_timesteps
@@ -2851,7 +2932,7 @@ class LatentDiffusionSRTextWT(DDPM):
                                             clip_denoised=self.clip_denoised,
                                             quantize_denoised=quantize_denoised, return_x0=True,
                                             temperature=temperature[i], noise_dropout=noise_dropout,
-                                            score_corrector=score_corrector, corrector_kwargs=corrector_kwargs)
+                                            score_corrector=score_corrector, corrector_kwargs=corrector_kwargs, cond_guidance=cond_guidance)
             if mask is not None:
                 assert x0 is not None
                 img_orig = self.q_sample(x0, ts)
@@ -2870,9 +2951,7 @@ class LatentDiffusionSRTextWT(DDPM):
                       log_every_t=None, time_replace=None, adain_fea=None, interfea_path=None,
                       unconditional_conditioning=None,
                       unconditional_guidance_scale=None,
-                      reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],
-                      ddnm_guidance=None,
-                      ):
+                      reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000], cond_guidance=None):
 
         if not log_every_t:
             log_every_t = self.log_every_t
@@ -2927,8 +3006,7 @@ class LatentDiffusionSRTextWT(DDPM):
                                 quantize_denoised=quantize_denoised, t_replace=t_replace,
                                 unconditional_conditioning=unconditional_conditioning,
                                 unconditional_guidance_scale=unconditional_guidance_scale,
-                                reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,
-                                ddnm_guidance=ddnm_guidance)
+                                reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,cond_guidance=cond_guidance)
 
             if adain_fea is not None:
                 if i < 1:
@@ -2994,7 +3072,7 @@ class LatentDiffusionSRTextWT(DDPM):
                       mask=None, x0=None, img_callback=None, start_T=None,
                       log_every_t=None, time_replace=None, adain_fea=None, interfea_path=None, tile_size=64, tile_overlap=32, batch_size=4,
                       unconditional_conditioning=None, unconditional_guidance_scale=None,
-                      reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],):
+                      reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],cond_guidance=None):
 
         assert tile_size is not None
 
@@ -3049,7 +3127,7 @@ class LatentDiffusionSRTextWT(DDPM):
                                 quantize_denoised=quantize_denoised, t_replace=t_replace,
                                 tile_size=tile_size, tile_overlap=tile_overlap, batch_size=batch_size, tile_weights=tile_weights,
                                 unconditional_conditioning=unconditional_conditioning, unconditional_guidance_scale=unconditional_guidance_scale,
-                                reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,)
+                                reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,cond_guidance=cond_guidance)
 
             if adain_fea is not None:
                 if i < 1:
@@ -3073,8 +3151,7 @@ class LatentDiffusionSRTextWT(DDPM):
                mask=None, x0=None, shape=None, time_replace=None, adain_fea=None, interfea_path=None, start_T=None,
                unconditional_conditioning=None,
                unconditional_guidance_scale=None,
-               reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],
-               ddnm_guidance=None, **kwargs):
+               reference_sr=None, reference_lr=0.05, reference_step=1, reference_range=[100, 1000],cond_guidance=None, **kwargs):
 
         if shape is None:
             shape = (batch_size, self.channels, self.image_size//8, self.image_size//8)
@@ -3092,14 +3169,13 @@ class LatentDiffusionSRTextWT(DDPM):
                                   mask=mask, x0=x0, time_replace=time_replace, adain_fea=adain_fea, interfea_path=interfea_path, start_T=start_T,
                                   unconditional_conditioning=unconditional_conditioning,
                                   unconditional_guidance_scale=unconditional_guidance_scale,
-                                  reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,
-                                  ddnm_guidance=ddnm_guidance)
+                                  reference_sr=reference_sr, reference_lr=reference_lr, reference_step=reference_step, reference_range=reference_range,cond_guidance=cond_guidance)
 
     @torch.no_grad()
     def sample_canvas(self, cond, struct_cond, batch_size=16, return_intermediates=False, x_T=None,
                verbose=True, timesteps=None, quantize_denoised=False,
                mask=None, x0=None, shape=None, time_replace=None, adain_fea=None, interfea_path=None, tile_size=64, tile_overlap=32, batch_size_sample=4, log_every_t=None,
-               unconditional_conditioning=None, unconditional_guidance_scale=None, **kwargs):
+               unconditional_conditioning=None, unconditional_guidance_scale=None,cond_guidance=None, **kwargs):
 
         if shape is None:
             shape = (batch_size, self.channels, self.image_size//8, self.image_size//8)
@@ -3115,10 +3191,10 @@ class LatentDiffusionSRTextWT(DDPM):
                                   return_intermediates=return_intermediates, x_T=x_T,
                                   verbose=verbose, timesteps=timesteps, quantize_denoised=quantize_denoised,
                                   mask=mask, x0=x0, time_replace=time_replace, adain_fea=adain_fea, interfea_path=interfea_path, tile_size=tile_size, tile_overlap=tile_overlap,
-                                  unconditional_conditioning=unconditional_conditioning, unconditional_guidance_scale=unconditional_guidance_scale, batch_size=batch_size_sample, log_every_t=log_every_t)
+                                  unconditional_conditioning=unconditional_conditioning, unconditional_guidance_scale=unconditional_guidance_scale, batch_size=batch_size_sample, log_every_t=log_every_t, cond_guidance=cond_guidance)
 
     @torch.no_grad()
-    def sample_log(self,cond,struct_cond,batch_size,ddim, ddim_steps,**kwargs):
+    def sample_log(self,cond,struct_cond,batch_size,ddim, ddim_steps, **kwargs):
 
         if ddim:
             raise NotImplementedError
@@ -3137,7 +3213,7 @@ class LatentDiffusionSRTextWT(DDPM):
     @torch.no_grad()
     def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=200, ddim_eta=1., return_keys=None,
                    quantize_denoised=True, inpaint=False, plot_denoise_rows=False, plot_progressive_rows=False,
-                   plot_diffusion_rows=False, **kwargs):
+                   plot_diffusion_rows=False, cond_guidance=None, **kwargs):
 
         use_ddim = ddim_steps is not None
 
@@ -3190,7 +3266,7 @@ class LatentDiffusionSRTextWT(DDPM):
                 else:
                     cur_time_step = 1000
 
-                samples, z_denoise_row = self.sample(cond=c, struct_cond=struct_cond, batch_size=N, timesteps=cur_time_step, return_intermediates=True, time_replace=self.time_replace)
+                samples, z_denoise_row = self.sample(cond=c, struct_cond=struct_cond, batch_size=N, timesteps=cur_time_step, return_intermediates=True, time_replace=self.time_replace, cond_guidance=cond_guidance)
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
             if plot_denoise_rows:
@@ -3202,7 +3278,7 @@ class LatentDiffusionSRTextWT(DDPM):
                 with self.ema_scope("Plotting Quantized Denoised"):
                     samples, z_denoise_row = self.sample_log(cond=c,struct_cond=struct_cond,batch_size=N,ddim=use_ddim,
                                                              ddim_steps=ddim_steps,eta=ddim_eta,
-                                                             quantize_denoised=True, x_T=x_T)
+                                                             quantize_denoised=True, x_T=x_T, cond_guidance=cond_guidance)
                 x_samples = self.decode_first_stage(samples.to(self.device))
                 log["samples_x0_quantized"] = x_samples
 
@@ -3217,7 +3293,7 @@ class LatentDiffusionSRTextWT(DDPM):
                 with self.ema_scope("Plotting Inpaint"):
 
                     samples, _ = self.sample_log(cond=c,batch_size=N,ddim=use_ddim, eta=ddim_eta,
-                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask)
+                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask, cond_guidance=cond_guidance)
                 x_samples = self.decode_first_stage(samples.to(self.device))
                 log["samples_inpainting"] = x_samples
                 log["mask"] = mask
@@ -3225,7 +3301,7 @@ class LatentDiffusionSRTextWT(DDPM):
                 # outpaint
                 with self.ema_scope("Plotting Outpaint"):
                     samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,eta=ddim_eta,
-                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask)
+                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask, cond_guidance=cond_guidance)
                 x_samples = self.decode_first_stage(samples.to(self.device))
                 log["samples_outpainting"] = x_samples
 
@@ -3233,7 +3309,7 @@ class LatentDiffusionSRTextWT(DDPM):
             with self.ema_scope("Plotting Progressives"):
                 img, progressives = self.progressive_denoising(c, struct_cond=struct_cond,
                                                                shape=(self.channels, self.image_size//8, self.image_size//8),
-                                                               batch_size=N)
+                                                               batch_size=N, cond_guidance=cond_guidance)
             prog_row = self._get_denoise_row_from_list(progressives, desc="Progressive Generation")
             log["progressive_row"] = prog_row
 

@@ -16,12 +16,15 @@ from contextlib import nullcontext
 import time
 from pytorch_lightning import seed_everything
 
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
 import math
 import copy
 from scripts.wavelet_color_fix import wavelet_reconstruction, adaptive_instance_normalization
+from scripts.helper import OriginGuidance, LenslessGuidance
 
 def space_timesteps(num_timesteps, section_counts):
 	"""
@@ -79,6 +82,37 @@ def chunk(it, size):
 	it = iter(it)
 	return iter(lambda: tuple(islice(it, size)), ())
 
+class ImageDataset(Dataset):
+	def __init__(self, init_img_dir, outpath, origin_img_dir=None, transform=None):
+		self.init_img_dir = init_img_dir
+		self.outpath = outpath
+		self.transform = transform if transform else transforms.ToTensor()
+		# Filter out non-image files and optionally perform subsampling
+		self.img_list = [img for img in sorted(os.listdir(init_img_dir)) if img.endswith(('.png', '.jpg', '.jpeg'))]
+		# Exclude already processed images
+		self.img_list = [img for img in self.img_list if not os.path.exists(os.path.join(outpath, img))]
+		self.origin_img_dir = init_img_dir.replace('inputs', 'gts')
+	def __len__(self):
+		return len(self.img_list)
+
+	def __getitem__(self, idx):
+		img_name = self.img_list[idx]
+		img_path = os.path.join(self.init_img_dir, img_name)
+		image = load_img(img_path)[0]
+		if self.transform:
+			image = self.transform(image)
+		image = image.clamp(-1, 1)
+		if self.origin_img_dir is not None:
+			org_img_path = os.path.join(self.origin_img_dir, img_name)
+			origin_image = load_img(org_img_path)[0]
+			if self.transform:
+				origin_image = self.transform(origin_image)
+			origin_image = origin_image.clamp(-1, 1)
+			return image, origin_image
+		else:	
+			return image, image
+	
+
 def load_model_from_config(config, ckpt, verbose=False):
 	print(f"Loading model from {ckpt}")
 	pl_sd = torch.load(ckpt, map_location="cpu")
@@ -101,13 +135,15 @@ def load_model_from_config(config, ckpt, verbose=False):
 def load_img(path):
 	image = Image.open(path).convert("RGB")
 	w, h = image.size
-	print(f"loaded input image of size ({w}, {h}) from {path}")
+	# print(f"loaded input image of size ({w}, {h}) from {path}")
 	w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
 	image = image.resize((w, h), resample=PIL.Image.LANCZOS)
 	image = np.array(image).astype(np.float32) / 255.0
 	image = image[None].transpose(0, 3, 1, 2)
 	image = torch.from_numpy(image)
 	return 2.*image - 1.
+
+
 
 
 def main():
@@ -118,14 +154,14 @@ def main():
 		type=str,
 		nargs="?",
 		help="path to the input image",
-		default="inputs/user_upload",
+		default="data/flatnet2single/inputs",
 	)
 	parser.add_argument(
 		"--outdir",
 		type=str,
 		nargs="?",
 		help="dir to write results to",
-		default="outputs/user_upload",
+		default="data/flatnet2single/outputs_ft",
 	)
 	parser.add_argument(
 		"--ddpm_steps",
@@ -154,7 +190,7 @@ def main():
 	parser.add_argument(
 		"--config",
 		type=str,
-		default="configs/stableSRNew/v2-finetune_text_T_512.yaml",
+		default="configs/stableSRNew/v2-finetune_lensless_cond_T_512.yaml",
 		help="path to config which constructs model",
 	)
 	parser.add_argument(
@@ -188,12 +224,12 @@ def main():
 		default=512,
 		help="input size",
 	)
-	parser.add_argument(
-		"--dec_w",
-		type=float,
-		default=0.5,
-		help="weight for combining VQGAN and Diffusion",
-	)
+	# parser.add_argument(
+	# 	"--dec_w",
+	# 	type=float,
+	# 	default=0.5,
+	# 	help="weight for combining VQGAN and Diffusion",
+	# )
 	parser.add_argument(
 		"--colorfix_type",
 		type=str,
@@ -213,10 +249,10 @@ def main():
 		print('No color correction')
 	print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
 
-	vqgan_config = OmegaConf.load("configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml")
-	vq_model = load_model_from_config(vqgan_config, opt.vqgan_ckpt)
-	vq_model = vq_model.to(device)
-	vq_model.decoder.fusion_w = opt.dec_w
+	# vqgan_config = OmegaConf.load("configs/autoencoder/autoencoder_kl_64x64x4_resi.yaml")
+	# vq_model = load_model_from_config(vqgan_config, opt.vqgan_ckpt)
+	# vq_model = vq_model.to(device)
+	# vq_model.decoder.fusion_w = opt.dec_w
 
 	seed_everything(opt.seed)
 
@@ -234,20 +270,8 @@ def main():
 
 	batch_size = opt.n_samples
 
-	img_list_ori = os.listdir(opt.init_img)
-	img_list = copy.deepcopy(img_list_ori)
-	init_image_list = []
-	for item in img_list_ori[::10]:
-		if os.path.exists(os.path.join(outpath, item)):
-			img_list.remove(item)
-			continue
-		cur_image = load_img(os.path.join(opt.init_img, item)).to(device)
-		cur_image = transform(cur_image)
-		cur_image = cur_image.clamp(-1, 1)
-		init_image_list.append(cur_image)
-	init_image_list = torch.cat(init_image_list, dim=0)
-	niters = math.ceil(init_image_list.size(0) / batch_size)
-	init_image_list = init_image_list.chunk(niters)
+	image_dataset = ImageDataset(opt.init_img, outpath, transform=transform)
+	image_dataloader = DataLoader(image_dataset, batch_size=batch_size, shuffle=False, num_workers=batch_size // 2, pin_memory=True)
 
 	model.register_schedule(given_betas=None, beta_schedule="linear", timesteps=1000,
 						  linear_start=0.00085, linear_end=0.0120, cosine_s=8e-3)
@@ -289,30 +313,32 @@ def main():
 
 	param_list = []
 	untrain_paramlist = []
-	for k, v in vq_model.named_parameters():
-		if 'fusion_layer' in k:
-			param_list.append(v)
-		elif 'loss' not in k:
-			untrain_paramlist.append(v)
-	trainable_params += sum(p.numel() for p in param_list)
-	# untrainable_params += sum(p.numel() for p in untrain_paramlist)
-	print(trainable_params)
-	print(untrainable_params)
+	# for k, v in vq_model.named_parameters():
+	# 	if 'fusion_layer' in k:
+	# 		param_list.append(v)
+	# 	elif 'loss' not in k:
+	# 		untrain_paramlist.append(v)
+	# trainable_params += sum(p.numel() for p in param_list)
+	# # untrainable_params += sum(p.numel() for p in untrain_paramlist)
+	# print(trainable_params)
+	# print(untrainable_params)
 
 	precision_scope = autocast if opt.precision == "autocast" else nullcontext
 	niqe_list = []
+	origin_guidance = OriginGuidance()
 	with torch.no_grad():
 		with precision_scope("cuda"):
 			with model.ema_scope():
 				tic = time.time()
 				count = 0
-				for n in trange(niters, desc="Sampling"):
-					init_image = init_image_list[n]
-					init_latent_generator, enc_fea_lq = vq_model.encode(init_image)
+				for init_image, gt_image in tqdm(image_dataloader):
+					init_image = init_image.to(device)
+					gt_image = gt_image.to(device)
+					init_latent_generator = model.encode_first_stage(init_image)
 					init_latent = model.get_first_stage_encoding(init_latent_generator)
 					text_init = ['']*init_image.size(0)
 					semantic_c = model.cond_stage_model(text_init)
-
+					origin_guidance.guidance_gt = gt_image
 					noise = torch.randn_like(init_latent)
 					# If you would like to start from the intermediate steps, you can add noise to LR to the specific steps.
 					t = repeat(torch.tensor([999]), '1 -> b', b=init_image.size(0))
@@ -320,8 +346,8 @@ def main():
 					x_T = model.q_sample_respace(x_start=init_latent, t=t, sqrt_alphas_cumprod=sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod=sqrt_one_minus_alphas_cumprod, noise=noise)
 					x_T = None
 
-					samples, _ = model.sample(cond=semantic_c, struct_cond=init_latent, batch_size=init_image.size(0), timesteps=opt.ddpm_steps, time_replace=opt.ddpm_steps, x_T=x_T, return_intermediates=True)
-					x_samples = vq_model.decode(samples * 1. / model.scale_factor, enc_fea_lq)
+					samples, _ = model.sample(cond=semantic_c, struct_cond=init_latent, batch_size=init_image.size(0), timesteps=opt.ddpm_steps, time_replace=opt.ddpm_steps, x_T=x_T, return_intermediates=True, cond_guidance=origin_guidance)
+					x_samples = model.decode_first_stage(samples)
 					if opt.colorfix_type == 'adain':
 						x_samples = adaptive_instance_normalization(x_samples, init_image)
 					elif opt.colorfix_type == 'wavelet':
@@ -336,7 +362,7 @@ def main():
 					# 	print(s)
 
 					for i in range(init_image.size(0)):
-						img_name = img_list.pop(0)
+						img_name = image_dataset.img_list.pop(0)
 						basename = os.path.splitext(os.path.basename(img_name))[0]
 						x_sample = 255. * rearrange(x_samples[i].cpu().numpy(), 'c h w -> h w c')
 						Image.fromarray(x_sample.astype(np.uint8)).save(

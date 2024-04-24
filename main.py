@@ -324,7 +324,7 @@ class ImageLogger(Callback):
                   global_step, current_epoch, batch_idx):
         root = os.path.join(save_dir, "images", split)
         for k in images:
-            grid = torchvision.utils.make_grid(images[k], nrow=4)
+            grid = torchvision.utils.make_grid(images[k], nrow=5)
             if self.rescale:
                 grid = (grid + 1.0) / 2.0  # -1,1 -> 0,1; c,h,w
             grid = grid.transpose(0, 1).transpose(1, 2).squeeze(-1)
@@ -341,7 +341,9 @@ class ImageLogger(Callback):
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
         check_idx = batch_idx if self.log_on_batch_idx else pl_module.global_step
-        if (self.check_frequency(check_idx) and  # batch_idx % self.batch_freq == 0
+        # print("check_idx", check_idx)
+        # print("self.check_frequency(check_idx)", self.check_frequency(check_idx))
+        if ((self.check_frequency(check_idx) or split!= "train") and  # batch_idx % self.batch_freq == 0
                 hasattr(pl_module, "log_images") and
                 callable(pl_module.log_images) and
                 self.max_images > 0):
@@ -387,7 +389,11 @@ class ImageLogger(Callback):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        # print("on_validation_batch_end")
+        # print("pl_module.global_step", pl_module.global_step)
+        # print("self.disabled", self.disabled)
         if not self.disabled and pl_module.global_step > 0:
+        # if not self.disabled:
             self.log_img(pl_module, batch, batch_idx, split="val")
         if hasattr(pl_module, 'calibrate_grad_norm'):
             if (pl_module.calibrate_grad_norm and batch_idx % 25 == 0) and batch_idx > 0:
@@ -416,6 +422,19 @@ class CUDACallback(Callback):
         except AttributeError:
             pass
 
+def load_model_from_ckpt(model, ckpt, verbose=False):
+	print(f"Loading model from {ckpt}")
+	pl_sd = torch.load(ckpt, map_location="cpu")
+	if "global_step" in pl_sd:
+		print(f"Global Step: {pl_sd['global_step']}")
+	sd = pl_sd["state_dict"]
+	m, u = model.load_state_dict(sd, strict=False)
+	if len(m) > 0 and verbose:
+		print("missing keys:")
+		print(m)
+	if len(u) > 0 and verbose:
+		print("unexpected keys:")
+		print(u)
 
 if __name__ == "__main__":
     from collections import OrderedDict
@@ -625,8 +644,8 @@ if __name__ == "__main__":
         "image_logger": {
             "target": "main.ImageLogger",
             "params": {
-                "batch_frequency": 750,
-                "max_images": 4,
+                "batch_frequency": 100,
+                "max_images": 5,
                 "clamp": True
             }
         },
@@ -741,3 +760,7 @@ if __name__ == "__main__":
             raise
     if not opt.no_test and not trainer.interrupted:
         trainer.test(model, data)
+    if opt.resume_from_checkpoint:
+        checkpoint_path = opt.resume_from_checkpoint
+        load_model_from_ckpt(model, checkpoint_path)
+        trainer.validate(model, data)

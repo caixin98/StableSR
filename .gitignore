@@ -133,3 +133,8 @@ venv.bak/
 .mypy_cache/
 
 outputs/
+
+data/
+
+*envents.out.tfevents*
+sim2real/tb_logs/*  

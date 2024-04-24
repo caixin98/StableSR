@@ -65,7 +65,7 @@ def space_timesteps(num_timesteps, section_counts):
         start_idx += size
     return set(all_steps)
 
-class DDIMSampler(object):
+class DDNMSampler(object):
     def __init__(self, model, schedule="linear", **kwargs):
         super().__init__()
         self.model = model
@@ -257,6 +257,9 @@ class DDIMSampler(object):
 
         # current prediction for x_0
         pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
+
+        
+
         if quantize_denoised:
             pred_x0, _, *_ = self.model.first_stage_model.quantize(pred_x0)
         # direction pointing to x_t
@@ -363,7 +366,7 @@ class DDIMSampler(object):
         return samples, intermediates
 
     @torch.no_grad()
-    def ddim_sampling_sr_t(self, cond, struct_cond, shape, ddnm_guidance=None,
+    def ddim_sampling_sr_t(self, cond, struct_cond, shape,
                       x_T=None, ddim_use_original_steps=False,
                       callback=None, timesteps=None, quantize_denoised=False,
                       mask=None, x0=None, img_callback=None, log_every_t=100,
@@ -400,8 +403,7 @@ class DDIMSampler(object):
                 img_orig = self.model.q_sample(x0, ts)  # TODO: deterministic forward pass?
                 img = img_orig * mask + (1. - mask) * img
 
-            outs = self.p_sample_ddim_sr_t(img, cond, struct_cond, ts, ddnm_guidance = ddnm_guidance,
-                                           index=index, use_original_steps=ddim_use_original_steps,
+            outs = self.p_sample_ddim_sr_t(img, cond, struct_cond, ts, index=index, use_original_steps=ddim_use_original_steps,
                                       quantize_denoised=quantize_denoised, temperature=temperature,
                                       noise_dropout=noise_dropout, score_corrector=score_corrector,
                                       corrector_kwargs=corrector_kwargs,
@@ -417,9 +419,8 @@ class DDIMSampler(object):
 
         return img, intermediates
 
-
     @torch.no_grad()
-    def p_sample_ddim_sr_t(self, x, c, struct_c, t, index, ddnm_guidance=None, repeat_noise=False, use_original_steps=False, quantize_denoised=False,
+    def p_sample_ddim_sr_t(self, x, c, struct_c, t, index, repeat_noise=False, use_original_steps=False, quantize_denoised=False,
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None):
         b, *_, device = *x.shape, x.device
@@ -454,12 +455,6 @@ class DDIMSampler(object):
 
         # current prediction for x_0
         pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
-        if ddnm_guidance is not None:
-            pred_x0_recon = self.model.decode_first_stage(pred_x0)
-            delta = ddnm_guidance(pred_x0_recon, t[0])
-            delta_generator = self.model.encode_first_stage(delta)
-            delta = self.model.get_first_stage_encoding(delta_generator)
-            pred_x0 = pred_x0 + ddnm_guidance.guidance_weight(t[0]) * delta
         if quantize_denoised:
             pred_x0, _, *_ = self.model.first_stage_model.quantize(pred_x0)
         # direction pointing to x_t
@@ -469,7 +464,6 @@ class DDIMSampler(object):
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
         x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
         return x_prev, pred_x0
-
 
     def _gaussian_weights(self, tile_width, tile_height, nbatches):
         """Generates a gaussian mask of weights for tile contributions"""

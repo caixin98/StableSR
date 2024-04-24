@@ -1,0 +1,1 @@
+python test.py --sim_capture_path /root/caixin/StableSR/data/flatnet/real_captures --real_capture_path /root/caixin/StableSR/data/flatnet_val/sim_captures --test_path test/flatnet_val/sim_captures --ckpt /root/caixin/StableSR/sim2real/tb_logs/real2sim/version_6/checkpoints/epoch=27-step=4619.ckpt --name real2sim

@@ -1,0 +1,1 @@
+python main.py --base configs/stableSRNew/v2-finetune_lensless_T_512.yaml --gpus 0,  --colorfix_type adain --name lensless_val --resume_from_checkpoint logs/2024-01-01T18-14-14_lensless/checkpoints/last.ckpt

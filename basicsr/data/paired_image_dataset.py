@@ -74,9 +74,11 @@ class PairedImageDataset(data.Dataset):
         img_gt = imfrombytes(img_bytes, float32=True)
         lq_path = self.paths[index]['lq_path']
         img_bytes = self.file_client.get(lq_path, 'lq')
+        # print("gt_path, lq_path", gt_path, lq_path)
         img_lq = imfrombytes(img_bytes, float32=True)
 
         h, w = img_gt.shape[0:2]
+        # print("---------------img_gt.shape[0:2]", img_gt.shape[0:2])
         # pad
         if h < self.opt['gt_size'] or w < self.opt['gt_size']:
             pad_h = max(0, self.opt['gt_size'] - h)
@@ -101,7 +103,9 @@ class PairedImageDataset(data.Dataset):
         # TODO: It is better to update the datasets, rather than force to crop
         if self.opt['phase'] != 'train':
             img_gt = img_gt[0:img_lq.shape[0] * scale, 0:img_lq.shape[1] * scale, :]
-
+        # print("img_gt.shape[0:2]", img_gt.shape[0:2])
+        # print("img_lq.shape[0:2]", img_lq.shape[0:2])
+        
         # BGR to RGB, HWC to CHW, numpy to tensor
         img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=True, float32=True)
         # normalize
