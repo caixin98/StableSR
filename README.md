@@ -4,7 +4,7 @@
 
 ## Exploiting Diffusion Prior for Real-World Image Super-Resolution
 
-[Paper](https://arxiv.org/abs/2305.07015) | [Project Page](https://iceclear.github.io/projects/stablesr/) | [Video](https://www.youtube.com/watch?v=5MZy9Uhpkw4) | [WebUI](https://github.com/pkuliyi2015/sd-webui-stablesr) | [ModelScope](https://modelscope.cn/models/xhlin129/cv_stablesr_image-super-resolution/summary)
+[Paper](https://arxiv.org/abs/2305.07015) | [Project Page](https://iceclear.github.io/projects/stablesr/) | [Video](https://www.youtube.com/watch?v=5MZy9Uhpkw4) | [WebUI](https://github.com/pkuliyi2015/sd-webui-stablesr) | [ModelScope](https://modelscope.cn/models/xhlin129/cv_stablesr_image-super-resolution/summary) | [ComfyUI](https://github.com/gameltb/comfyui-stablesr)
 
 
 <a href="https://colab.research.google.com/drive/11SE2_oDvbYtcuHDbaLAxsKk_o3flsO1T?usp=sharing"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="google colab logo"></a> [![Hugging Face](https://img.shields.io/badge/Demo-%F0%9F%A4%97%20Hugging%20Face-blue)](https://huggingface.co/spaces/Iceclear/StableSR) [![Replicate](https://img.shields.io/badge/Demo-%F0%9F%9A%80%20Replicate-blue)](https://replicate.com/cjwbw/stablesr) [![OpenXLab](https://img.shields.io/badge/Demo-%F0%9F%90%BC%20OpenXLab-blue)](https://openxlab.org.cn/apps/detail/Iceclear/StableSR) ![visitors](https://visitor-badge.laobi.icu/badge?page_id=IceClear/StableSR)
@@ -19,10 +19,13 @@ S-Lab, Nanyang Technological University
 :star: If StableSR is helpful to your images or projects, please help star this repo. Thanks! :hugs:
 
 ### Update
+- **2024.02.29**: Support StableSR with [SD-Turbo](https://huggingface.co/stabilityai/sd-turbo). Thank [Andray](https://github.com/light-and-ray) for the finding!
+
+  Now the [ComfyUI](https://github.com/gameltb/comfyui-stablesr) [![GitHub Stars](https://img.shields.io/github/stars/gameltb/comfyui-stablesr?style=social)](https://github.com/gameltb/comfyui-stablesr) of StableSR is also available. Thank [gameltb](https://github.com/gameltb) and [WSJUSA](https://github.com/WSJUSA) for the implementation!
 - **2023.11.30**: Code Update.
   - Support DDIM and negative prompts
   - Add CFW training scripts
-  - Add FaceSR training and test scripts (**Not test yet**)
+  - Add FaceSR training and test scripts
 - **2023.10.08**: Our test sets associated with the results in our [paper](https://arxiv.org/abs/2305.07015) are now available at [[HuggingFace](https://huggingface.co/datasets/Iceclear/StableSR-TestSets)] and [[OpenXLab](https://openxlab.org.cn/datasets/Iceclear/StableSR_Testsets)]. You may have an easy comparison with StableSR now.
 - **2023.08.19**: Integrated to :hugs: [Hugging Face](https://huggingface.co/spaces). Try out online demo! [![Hugging Face](https://img.shields.io/badge/Demo-%F0%9F%A4%97%20Hugging%20Face-blue)](https://huggingface.co/spaces/Iceclear/StableSR).
 - **2023.08.19**: Integrated to :panda_face: [OpenXLab](https://openxlab.org.cn/apps). Try out online demo! [![OpenXLab](https://img.shields.io/badge/Demo-%F0%9F%90%BC%20OpenXLab-blue)](https://openxlab.org.cn/apps/detail/Iceclear/StableSR).
@@ -39,8 +42,6 @@ S-Lab, Nanyang Technological University
 ### TODO
 - [ ] StableSR-XL
 - [ ] StableSR-Text
-- [ ] ComfyUI support
-- [ ] Acceleration
 - [x] ~~Code release~~
 - [x] ~~Update link to paper and project page~~
 - [x] ~~Pretrained models~~
@@ -49,6 +50,7 @@ S-Lab, Nanyang Technological University
 - [x] ~~Replicate demo~~
 - [x] ~~HuggingFace demo~~
 - [x] ~~StableSR-face released~~
+- [x] ~~ComfyUI support~~
 
 ### Demo on real-world SR
 
@@ -154,7 +156,18 @@ We use the same color correction scheme introduced in paper by default.
 You may change ```--colorfix_type wavelet``` for better color correction.
 You may also disable color correction by ```--colorfix_type nofix```
 
+- **StableSR-Turbo**: Get the ckpt first from [[HuggingFace](https://huggingface.co/Iceclear/StableSR/resolve/main/stablesr_turbo.ckpt) or [OpenXLab](https://openxlab.org.cn/models/detail/Iceclear/StableSR/tree/main)]. Then you just need to modify ```--ckpt_path``` and set ```--ddpm_steps``` to 4. See examples below:
+
+```
+python scripts/sr_val_ddpm_text_T_vqganfin_old.py --config configs/stableSRNew/v2-finetune_text_T_512.yaml --ckpt ./stablesr_turbo.ckpt --init-img LQ_PATH --outdir OUT_PATH --ddpm_steps 4 --dec_w 0.5 --seed 42 --n_samples 1 --vqgan_ckpt ./vqgan_cfw_00011.ckpt --colorfix_type wavelet
+```
+
+```
+python scripts/sr_val_ddpm_text_T_vqganfin_oldcanvas_tile.py --config configs/stableSRNew/v2-finetune_text_T_512.yaml --ckpt ./stablesr_turbo.ckpt --init-img LQ_PATH --outdir OUT_PATH --ddpm_steps 4 --dec_w 0.5 --seed 42 --n_samples 1 --vqgan_ckpt ./vqgan_cfw_00011.ckpt --colorfix_type wavelet --upscale 4
+```
+
 - **DDIM is supported now. See [here](https://github.com/IceClear/StableSR/tree/main/scripts)**
+
 - Test on 128 --> 512: You need at least 10G GPU memory to run this script (batchsize 2 by default)
 ```
 python scripts/sr_val_ddpm_text_T_vqganfin_old.py --config configs/stableSRNew/v2-finetune_text_T_512.yaml --ckpt CKPT_PATH --vqgan_ckpt VQGANCKPT_PATH --init-img INPUT_PATH --outdir OUT_DIR --ddpm_steps 200 --dec_w 0.5 --colorfix_type adain
