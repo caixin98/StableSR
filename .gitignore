@@ -138,3 +138,5 @@ data/
 
 *envents.out.tfevents*
 sim2real/tb_logs/*  
+*.npz
+mirflickr/*

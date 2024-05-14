@@ -3,11 +3,11 @@ if [ $# -eq 0 ]; then
   echo "必须提供参数" >&2
   exit 1
 fi
-rm -rf data/flatnet_multi_decode_sim_val/$1
-python ./scripts/sr_val_ddpm_lensless.py  --init-img data/flatnet_multi_decode_sim_val/inputs --outdir data/flatnet_multi_decode_sim_val/$1  --ckpt logs/2024-04-15T00-59-14_flatnet_decoded_sim_multi/checkpoints/last.ckpt --n_samples 5   --ddpm_steps 1000 
+# rm -rf data/flatnet_multi_decode_sim_val/$1
+python ./scripts/sr_val_ddpm_lensless.py  --init-img data/flatnet_multi_decode_sim_val/inputs --outdir data/flatnet_multi_decode_sim_val/$1  --ckpt logs/2024-04-15T00-59-14_flatnet_decoded_sim_multi/checkpoints/epoch\=000310.ckpt --n_samples 5   --ddpm_steps 200 
 ./scripts/iqa.sh data/flatnet_multi_decode_sim_val/$1  
 #  --colorfix_type adain
 
 # --ckpt logs/2024-01-01T18-14-14_lensless/checkpoints/last.ckpt
 # --precision full
-# 
+# /root/caixin/StableSR/logs/2024-04-15T00-59-14_flatnet_decoded_sim_multi/checkpoints/epoch=000310.ckpt

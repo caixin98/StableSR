@@ -3354,6 +3354,11 @@ class LatentDiffusionSRTextWTFFHQ(LatentDiffusionSRTextWT):
 
         return out
 
+class LatentDiffusionSRTextWTFFHQl1(LatentDiffusionSRTextWTFFHQ):
+    def __init__(self,  *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.loss_type =='l1'
+
 class DiffusionWrapper(pl.LightningModule):
     def __init__(self, diff_model_config, conditioning_key):
         super().__init__()

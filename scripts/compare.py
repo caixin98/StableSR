@@ -24,12 +24,12 @@ def concat_images(image_paths):
     resized_images = [cv2.resize(img, (int(img.shape[1] * min_height / img.shape[0]), min_height)) for img in images]
     return cv2.hconcat(resized_images)
 
-def main(folders):
+def main(save_folder, folders):
     matching_images = find_matching_images(folders)
     
     # 确定保存的基础文件夹, 这里假设保存在第一个输入文件夹中的 "compare" 目录
     base_folder = "data"
-    compare_folder = os.path.join(base_folder, 'compare_diff')
+    compare_folder = os.path.join(base_folder, save_folder)
     if not os.path.exists(compare_folder):
         os.makedirs(compare_folder)
     
@@ -42,10 +42,11 @@ def main(folders):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='拼接多个文件夹中相同名字的图像文件')
+    parser.add_argument('--save_folder', type=str, default="compare", help='需要处理的文件夹路径')
     parser.add_argument('folder_paths', type=str, nargs='+', help='需要处理的文件夹路径')
 
     args = parser.parse_args()
-    main(args.folder_paths)
+    main(args.save_folder, args.folder_paths)
 
 
 # compare

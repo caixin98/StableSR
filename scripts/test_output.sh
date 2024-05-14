@@ -4,7 +4,10 @@ if [ $# -eq 0 ]; then
   exit 1
 fi
 rm -rf data/flatnet_output_val/$1
-python ./scripts/sr_val_ddpm_lensless.py  --init-img data/flatnet_output_val/inputs --outdir data/flatnet_output_val/$1  --ckpt /root/caixin/StableSR/logs/2024-01-04T16-36-19_flatnet_output/checkpoints/last.ckpt --n_samples 5 --ddpm_steps 200
+# python ./scripts/sr_val_ddpm_lensless.py  --init-img data/flatnet_output_val/inputs --outdir data/flatnet_output_val/$1  --ckpt  /root/caixin/StableSR/logs/2024-01-04T16-36-19_flatnet_output/checkpoints/last.ckpt --n_samples 5 --ddpm_steps 200
+# ./scripts/iqa.sh data/flatnet_output_val/$1  
+
+python ./scripts/sr_val_ddpm_lensless.py  --init-img data/flatnet_output_val/inputs --outdir data/flatnet_output_val/$1  --ckpt  /root/caixin/StableSR/ckpts/stablesr_000117.ckpt --n_samples 5 --ddpm_steps 200
 ./scripts/iqa.sh data/flatnet_output_val/$1  
 #  --colorfix_type adain
 

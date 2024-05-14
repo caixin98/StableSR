@@ -84,15 +84,14 @@ def chunk(it, size):
 	return iter(lambda: tuple(islice(it, size)), ())
 
 class ImageDataset(Dataset):
-    def __init__(self, init_img_dir, outpath, transform=None):
+    def __init__(self, init_img_dir, outpath, transform=None, gpu_id=0, gpu_num=1):
         self.init_img_dir = init_img_dir
         self.outpath = outpath
         self.transform = transform if transform else transforms.ToTensor()
         # Filter out non-image files and optionally perform subsampling
         self.img_list = [img for img in sorted(os.listdir(init_img_dir)) if img.endswith(('.png', '.jpg', '.jpeg'))]
         # Exclude already processed images
-        self.img_list = [img for img in self.img_list if not os.path.exists(os.path.join(outpath, img))]
-
+        self.img_list = [img for img in self.img_list if not os.path.exists(os.path.join(outpath, img))][gpu_id::gpu_num]
     def __len__(self):
         return len(self.img_list)
 
@@ -222,6 +221,19 @@ def main():
 	# 	default=0.5,
 	# 	help="weight for combining VQGAN and Diffusion",
 	# )
+	# add gpu id and gpu num
+	parser.add_argument(
+		"--gpu_id",
+		type=int,
+		default=0,
+		help="gpu id",
+	)
+	parser.add_argument(
+		"--gpu_num",
+		type=int,
+		default=1,
+		help="gpu num",
+	)
 	parser.add_argument(
 		"--colorfix_type",
 		type=str,
@@ -263,7 +275,7 @@ def main():
 
 	batch_size = opt.n_samples
 
-	image_dataset = ImageDataset(opt.init_img, outpath, transform=transform)
+	image_dataset = ImageDataset(opt.init_img, outpath, transform=transform, gpu_id=opt.gpu_id, gpu_num=opt.gpu_num)
 	image_dataloader = DataLoader(image_dataset, batch_size=batch_size, shuffle=False, num_workers=batch_size // 2, pin_memory=True)
 
 	model.register_schedule(given_betas=None, beta_schedule="linear", timesteps=1000,
