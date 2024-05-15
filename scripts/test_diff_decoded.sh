@@ -6,7 +6,7 @@ fi
 gpu_num=`nvidia-smi --list-gpus | wc -l`
 rm -rf data/diffusercam_unet_padding_decode_sim_val/$1
 for i in $(seq 0 $((gpu_num - 1))); do
-  CUDA_VISIBLE_DEVICES=$i python ./scripts/sr_val_ddpm_lensless.py  --init-img data/diffusercam_unet_padding_decode_sim_val/inputs --outdir data/diffusercam_unet_padding_decode_sim_val/$1  --ckpt /mnt/data/oss_beijing/caixin/updated/logs/2024-05-12T20-37-48_diffusercam_decoded_sim_padding/checkpoints/last.ckpt --n_samples 5   --ddpm_steps 100 --gpu_num $gpu_num --gpu_id $i &
+  CUDA_VISIBLE_DEVICES=$i python ./scripts/sr_val_ddpm_lensless.py  --init-img data/diffusercam_unet_padding_decode_sim_val/inputs --outdir data/diffusercam_unet_padding_decode_sim_val/$1  --ckpt /mnt/data/oss_beijing/caixin/updated/logs/2024-05-12T20-37-48_diffusercam_decoded_sim_padding/checkpoints/last.ckpt --n_samples 5   --ddpm_steps 500 --gpu_num $gpu_num --gpu_id $i &
 done
 wait
 ./scripts/iqa_diff.sh data/diffusercam_unet_padding_decode_sim_val/$1  

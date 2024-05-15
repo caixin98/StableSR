@@ -1,6 +1,6 @@
 # transfer flatnet dataset to single dataset in one folder, resize to 512x512
-exp_name = "fft-1280-1408-learn-1280-1408-meas-1280-1408"
-output_name = "flatnet_output_384"
+exp_name = "fft-1280-1408-learn-1280-1408-meas-no_ad"
+output_name = "le-admm-u"
 
 output_dir = '/root/caixin/StableSR/data/%s_val'%output_name
 source_flatnet_dir = '/root/caixin/flatnet/output_phase_mask_Feb_2020_size_384/%s/val_latest_tag_384_gain_1.0'%exp_name
@@ -34,10 +34,10 @@ for cls in tqdm(os.listdir(source_flatnet_dir)):
             shutil.copy(gt_file, os.path.join(output_gts, file[7:]))
             #resize to 512x512
             img = cv2.imread(os.path.join(output_inputs, file[7:]))
-            img = cv2.resize(img, (384, 384))
+            img = cv2.resize(img, (512, 512))
             cv2.imwrite(os.path.join(output_inputs, file[7:]), img)
             img = cv2.imread(os.path.join(output_gts, file[7:]))
-            img = cv2.resize(img, (384, 384))
+            img = cv2.resize(img, (512, 512))
             cv2.imwrite(os.path.join(output_gts, file[7:]), img)
             index += 1
             print("index: ", index, file[7:])
